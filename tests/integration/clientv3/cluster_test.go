@@ -26,8 +26,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
@@ -320,6 +322,42 @@ func TestMemberPromote(t *testing.T) {
 			t.Fatalf("unexpected error when promoting learner member: %v", err)
 		}
 	}
+}
+
+func TestMemberPromoteWithStoppedLearnerAndVoter(t *testing.T) {
+	integration.BeforeTest(t)
+
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
+	defer clus.Terminate(t)
+
+	// Wait for the existing voters to remain connected for the strict reconfiguration health interval.
+	time.Sleep(etcdserver.HealthInterval)
+
+	learner := clus.MustNewMember(t)
+	addResp, err := clus.Client(0).MemberAddAsLearner(t.Context(), learner.PeerURLs.StringSlice())
+	require.NoError(t, err)
+	clus.InitializeMemberWithResponse(t, learner, addResp)
+	require.NoError(t, learner.Launch())
+
+	_, err = clus.Client(0).Put(t.Context(), "foo", "bar")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		status, err := clus.Client(0).Status(t.Context(), learner.GRPCURL)
+		return err == nil && status != nil && status.RaftAppliedIndex >= status.RaftIndex
+	}, 10*time.Second, 100*time.Millisecond, "learner did not catch up")
+	time.Sleep(etcdserver.HealthInterval)
+
+	leaderIdx := clus.WaitLeader(t)
+	downIdx := (leaderIdx + 1) % 3
+	clus.Members[downIdx].Stop(t)
+	learner.Stop(t)
+	time.Sleep(etcdserver.HealthInterval)
+
+	_, err = clus.Client(leaderIdx).MemberPromote(t.Context(), addResp.Member.ID)
+	require.Equal(t, rpctypes.ErrMemberNotEnoughStarted.Error(), rpctypes.ErrorDesc(err))
+
+	_, err = clus.Client(leaderIdx).Put(t.Context(), "foo", "qux")
+	require.NoError(t, err)
 }
 
 // TestMemberPromoteMemberNotLearner ensures that promoting a voting member fails.

@@ -1536,7 +1536,13 @@ func (s *EtcdServer) mayPromoteMember(id types.ID) error {
 	if !s.Cfg.StrictReconfigCheck {
 		return nil
 	}
-	if !s.cluster.IsReadyToPromoteMember(uint64(id)) {
+	votingMembers := s.cluster.VotingMembers()
+	since := time.Now().Add(-HealthInterval)
+	activeMembers := numConnectedSince(s.r.transport, since, s.MemberID(), votingMembers)
+	if isConnectedSince(s.r.transport, since, types.ID(id)) {
+		activeMembers++
+	}
+	if !s.cluster.IsReadyToPromoteMember(uint64(id)) || activeMembers < quorum(len(votingMembers)+1) {
 		lg.Warn(
 			"rejecting member promote request; not enough healthy members",
 			zap.String("local-member-id", s.MemberID().String()),
